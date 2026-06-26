@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from openai import OpenAI
+import httpx
 import os
 from dotenv import load_dotenv
 
@@ -9,7 +9,6 @@ load_dotenv()
 
 app = FastAPI()
 
-# CORS so the frontend can talk to backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,29 +16,55 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+SYSTEM_PROMPT = (
+    "You are a supportive mental coach. Help users with stress, motivation, "
+    "habits, and confidence. Be empathetic, encouraging, and practical."
+)
+
+APIM_ENDPOINT = "https://lgts1tetamapi01.azure-api.net/gpt51/openai/responses"
+
 
 class ChatRequest(BaseModel):
     message: str
+
 
 @app.get("/")
 def root():
     return {"status": "ok"}
 
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok"}
+
+
 @app.post("/api/chat")
 def chat(request: ChatRequest):
-    if not os.getenv("OPENAI_API_KEY"):
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
-    
+
     try:
-        user_message = request.message
-        response = client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {"role": "system", "content": "You are a supportive mental coach."},
-                {"role": "user", "content": user_message}
-            ]
-        )
-        return {"reply": response.choices[0].message.content}
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(
+                APIM_ENDPOINT,
+                params={"subscription-key": api_key},
+                json={
+                    "model": "gpt-5.1",
+                    "input": request.message,
+                    "instructions": SYSTEM_PROMPT,
+                },
+                headers={"Content-Type": "application/json"},
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        reply = data["output"][0]["content"][0]["text"]
+        return {"reply": reply}
+
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=500, detail=f"API error: {e.response.text}")
+    except (KeyError, IndexError) as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected response format: {str(e)}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error calling OpenAI API: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
